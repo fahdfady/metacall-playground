@@ -6,3 +6,6 @@ An Interactive TUI for testing polyglot function calls and pipeline development,
 
 ## what is MetaCall?
 MetaCall is a polyglot runtime that powers this application and many other cool applications. It allows us to run different Programming languages in the same enviroment and share data between them.
+
+
+![screenshot.png](assets/screenshot.png)
