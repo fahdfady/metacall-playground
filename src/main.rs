@@ -1,67 +1,28 @@
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use metacall::{initialize, load, metacall};
 use ratatui::{
+    Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{
-        Block, Borders, Cell, List, ListItem, Padding, Paragraph, Row, Table, Tabs, Wrap,
-    },
-    Frame, Terminal,
+    widgets::{Block, Borders, Cell, List, ListItem, Padding, Paragraph, Row, Table, Tabs, Wrap},
 };
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    fs,
-    io,
+    fs, io,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 use walkdir::WalkDir;
 
-#[derive(Debug, Clone)]
-struct Script {
-    path: PathBuf,
-    name: String,
-    language: String,
-    runtime: String,
-    functions: Vec<String>,
-    loaded: bool,
-    error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ExecutionResult {
-    function: String,
-    args: Vec<String>,
-    output: String,
-    duration_ms: u64,
-    success: bool,
-    timestamp: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PipelineStep {
-    id: String,
-    script: String,
-    function: String,
-    args: Vec<String>,
-    description: String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum View {
-    ScriptBrowser,
-    FunctionTester,
-    PipelineBuilder,
-    ResultsExplorer,
-    Export,
-}
+mod models;
+use models::*;
 
 struct App {
     root_dir: PathBuf,
@@ -77,36 +38,6 @@ struct App {
     function_input: FunctionInput,
     selected_result: usize,
     show_help: bool,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum InputMode {
-    Normal,
-    EditingArgs,
-    AddingStep,
-    ExportName,
-}
-
-#[derive(Debug, Clone)]
-struct FunctionInput {
-    selected_function: usize,
-    args: Vec<String>,
-    current_arg: String,
-}
-
-#[derive(Debug, Clone)]
-struct LogEntry {
-    timestamp: String,
-    level: LogLevel,
-    message: String,
-}
-
-#[derive(Debug, Clone)]
-enum LogLevel {
-    Info,
-    Success,
-    Error,
-    Warning,
 }
 
 impl App {
@@ -190,7 +121,7 @@ impl App {
                         .unwrap_or_default()
                         .to_string_lossy()
                         .to_string();
-                    
+
                     self.scripts.push(Script {
                         path: path.to_path_buf(),
                         name: name.clone(),
@@ -205,10 +136,7 @@ impl App {
             }
         }
 
-        self.add_log(
-            LogLevel::Success,
-            format!("Found {} scripts", found),
-        );
+        self.add_log(LogLevel::Success, format!("Found {} scripts", found));
     }
 
     fn load_script(&mut self, index: usize) -> Result<(), String> {
@@ -222,28 +150,21 @@ impl App {
         let script_runtime = self.scripts[index].runtime.clone();
         let script_language = self.scripts[index].language.clone();
 
-        self.add_log(
-            LogLevel::Info,
-            format!("Loading {}...", script_name),
-        );
+        self.add_log(LogLevel::Info, format!("Loading {}...", script_name));
 
         match load::from_single_file(&script_runtime, script_path.to_str().unwrap()) {
             Ok(_) => {
                 self.scripts[index].loaded = true;
                 self.scripts[index].error = None;
-                
+
                 if let Ok(content) = fs::read_to_string(&script_path) {
                     let functions = self.extract_functions(&content, &script_language);
                     let func_count = functions.len();
                     self.scripts[index].functions = functions;
-                    
+
                     self.add_log(
                         LogLevel::Success,
-                        format!(
-                            "Loaded {} - found {} functions",
-                            script_name,
-                            func_count
-                        ),
+                        format!("Loaded {} - found {} functions", script_name, func_count),
                     );
                 }
                 Ok(())
@@ -251,7 +172,10 @@ impl App {
             Err(e) => {
                 let error = format!("{:?}", e);
                 self.scripts[index].error = Some(error.clone());
-                self.add_log(LogLevel::Error, format!("Failed to load {}: {}", script_name, error));
+                self.add_log(
+                    LogLevel::Error,
+                    format!("Failed to load {}: {}", script_name, error),
+                );
                 Err(error)
             }
         }
@@ -259,7 +183,7 @@ impl App {
 
     fn extract_functions(&self, content: &str, language: &str) -> Vec<String> {
         let mut functions = Vec::new();
-        
+
         match language {
             "Python" => {
                 for line in content.lines() {
@@ -285,7 +209,9 @@ impl App {
                             functions.push(name.to_string());
                         }
                     } else if trimmed.starts_with("const ") || trimmed.starts_with("let ") {
-                        if trimmed.contains(" = ") && (trimmed.contains("=>") || trimmed.contains("function")) {
+                        if trimmed.contains(" = ")
+                            && (trimmed.contains("=>") || trimmed.contains("function"))
+                        {
                             if let Some(name) = trimmed
                                 .split_whitespace()
                                 .nth(1)
@@ -314,7 +240,7 @@ impl App {
             }
             _ => {}
         }
-        
+
         functions
     }
 
@@ -335,14 +261,14 @@ impl App {
         let func_name = script.functions[self.function_input.selected_function].clone();
         let script_name = script.name.clone();
         let args = self.function_input.args.clone();
-        
+
         self.add_log(
             LogLevel::Info,
             format!("Executing {}({:?})", func_name, args),
         );
 
         let start = Instant::now();
-        
+
         // Fixed: Use single generic parameter for metacall
         let result: Result<String, String> = if args.is_empty() {
             metacall::<String>(&func_name, Vec::<i32>::new())
@@ -354,7 +280,7 @@ impl App {
                 })
         } else if args.len() == 1 {
             let arg = &args[0];
-            
+
             if let Ok(num) = arg.parse::<i64>() {
                 metacall::<String>(&func_name, vec![num])
                     .map_err(|e| format!("{:?}", e))
@@ -373,11 +299,8 @@ impl App {
                     })
             }
         } else {
-            let nums: Result<Vec<i64>, _> = args
-                .iter()
-                .map(|s| s.parse::<i64>())
-                .collect();
-                
+            let nums: Result<Vec<i64>, _> = args.iter().map(|s| s.parse::<i64>()).collect();
+
             if let Ok(nums) = nums {
                 metacall::<String>(&func_name, nums.clone())
                     .map_err(|e| format!("{:?}", e))
@@ -387,8 +310,7 @@ impl App {
                             .map_err(|e| format!("{:?}", e))
                     })
             } else {
-                metacall::<String>(&func_name, args.clone())
-                    .map_err(|e| format!("{:?}", e))
+                metacall::<String>(&func_name, args.clone()).map_err(|e| format!("{:?}", e))
             }
         };
 
@@ -404,11 +326,8 @@ impl App {
                     success: true,
                     timestamp: Self::timestamp(),
                 });
-                
-                self.add_log(
-                    LogLevel::Success,
-                    format!("✓ {}ms → {}", duration, output),
-                );
+
+                self.add_log(LogLevel::Success, format!("✓ {}ms → {}", duration, output));
                 Ok(())
             }
             Err(e) => {
@@ -420,7 +339,7 @@ impl App {
                     success: false,
                     timestamp: Self::timestamp(),
                 });
-                
+
                 self.add_log(LogLevel::Error, format!("✗ Error: {}", e));
                 Err(e)
             }
@@ -438,10 +357,10 @@ impl App {
         }
 
         let func = &script.functions[self.function_input.selected_function];
-        
+
         let id = format!("step_{}", self.pipeline.len() + 1);
         let description = format!("{}({})", func, self.function_input.args.join(", "));
-        
+
         self.pipeline.push(PipelineStep {
             id: id.clone(),
             script: script.name.clone(),
@@ -450,10 +369,7 @@ impl App {
             description,
         });
 
-        self.add_log(
-            LogLevel::Success,
-            format!("Added {} to pipeline", id),
-        );
+        self.add_log(LogLevel::Success, format!("Added {} to pipeline", id));
     }
 
     fn execute_pipeline(&mut self) -> Result<(), String> {
@@ -470,13 +386,13 @@ impl App {
 
         for (i, step) in pipeline.iter().enumerate() {
             self.selected_pipeline_step = i;
-            
+
             let script_idx = self.scripts.iter().position(|s| s.name == step.script);
             if script_idx.is_none() {
                 self.add_log(LogLevel::Error, format!("Script {} not found", step.script));
                 continue;
             }
-            
+
             let script_idx = script_idx.unwrap();
             if !self.scripts[script_idx].loaded {
                 let _ = self.load_script(script_idx);
@@ -484,7 +400,7 @@ impl App {
 
             let old_input = self.function_input.clone();
             self.function_input.args = step.args.clone();
-            
+
             if let Some(func_idx) = self.scripts[script_idx]
                 .functions
                 .iter()
@@ -494,14 +410,19 @@ impl App {
                 let _ = self.execute_function();
                 success_count += 1;
             }
-            
+
             self.function_input = old_input;
         }
 
         let duration = start.elapsed().as_millis() as u64;
         self.add_log(
             LogLevel::Success,
-            format!("Pipeline completed: {}/{} steps in {}ms", success_count, self.pipeline.len(), duration),
+            format!(
+                "Pipeline completed: {}/{} steps in {}ms",
+                success_count,
+                self.pipeline.len(),
+                duration
+            ),
         );
 
         Ok(())
@@ -509,17 +430,17 @@ impl App {
 
     fn export_pipeline(&self) -> String {
         let mut output = String::new();
-        
+
         output.push_str("// Generated MetaCall Pipeline\n");
         output.push_str("// Export Date: ");
         output.push_str(&Self::timestamp());
         output.push_str("\n\n");
-        
+
         output.push_str("// === Rust Implementation ===\n");
         output.push_str("use metacall::{initialize, load, metacall};\n\n");
         output.push_str("fn execute_pipeline() -> Result<(), String> {\n");
         output.push_str("    let _metacall = initialize()?;\n\n");
-        
+
         let mut loaded_scripts = std::collections::HashSet::new();
         for step in &self.pipeline {
             if !loaded_scripts.contains(&step.script) {
@@ -533,9 +454,9 @@ impl App {
                 }
             }
         }
-        
+
         output.push_str("\n");
-        
+
         for (i, step) in self.pipeline.iter().enumerate() {
             output.push_str(&format!("    // Step {}: {}\n", i + 1, step.description));
             output.push_str(&format!(
@@ -543,7 +464,7 @@ impl App {
                 i + 1,
                 step.function
             ));
-            
+
             for (j, arg) in step.args.iter().enumerate() {
                 if j > 0 {
                     output.push_str(", ");
@@ -554,19 +475,23 @@ impl App {
                     output.push_str(&format!("\"{}\".to_string()", arg));
                 }
             }
-            
+
             output.push_str("])?;\n");
-            output.push_str(&format!("    println!(\"Step {}: {{}}\", result_{});\n\n", i + 1, i + 1));
+            output.push_str(&format!(
+                "    println!(\"Step {}: {{}}\", result_{});\n\n",
+                i + 1,
+                i + 1
+            ));
         }
-        
+
         output.push_str("    Ok(())\n");
         output.push_str("}\n\n");
-        
+
         output.push_str("// === JSON Configuration ===\n");
         output.push_str("/*\n");
         output.push_str(&serde_json::to_string_pretty(&self.pipeline).unwrap_or_default());
         output.push_str("\n*/\n");
-        
+
         output
     }
 
@@ -594,7 +519,11 @@ impl App {
 fn ui(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(6)])
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(6),
+        ])
         .split(f.area());
 
     render_header(f, app, chunks[0]);
@@ -672,7 +601,9 @@ fn render_script_browser(f: &mut Frame, app: &App, area: Rect) {
             };
 
             let style = if i == app.selected_script {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
             } else if script.loaded {
                 Style::default().fg(Color::Green)
             } else if script.error.is_some() {
@@ -681,8 +612,11 @@ fn render_script_browser(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(Color::Gray)
             };
 
-            ListItem::new(format!("{} {} {} [{}]", status, icon, script.name, script.language))
-                .style(style)
+            ListItem::new(format!(
+                "{} {} {} [{}]",
+                status, icon, script.name, script.language
+            ))
+            .style(style)
         })
         .collect();
 
@@ -725,13 +659,11 @@ fn render_script_browser(f: &mut Frame, app: &App, area: Rect) {
                 Span::styled(error, Style::default().fg(Color::Red)),
             ]));
         } else if script.loaded {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("Functions ({}): ", script.functions.len()),
-                    Style::default().fg(Color::Gray),
-                ),
-            ]));
-            
+            lines.push(Line::from(vec![Span::styled(
+                format!("Functions ({}): ", script.functions.len()),
+                Style::default().fg(Color::Gray),
+            )]));
+
             for func in &script.functions {
                 lines.push(Line::from(format!("  • {}", func)));
             }
@@ -777,14 +709,16 @@ fn render_function_tester(f: &mut Frame, app: &App, area: Rect) {
 
     if !app.scripts.is_empty() && app.selected_script < app.scripts.len() {
         let script = &app.scripts[app.selected_script];
-        
+
         let func_items: Vec<ListItem> = script
             .functions
             .iter()
             .enumerate()
             .map(|(i, func)| {
                 let style = if i == app.function_input.selected_function {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::White)
                 };
@@ -819,7 +753,12 @@ fn render_function_tester(f: &mut Frame, app: &App, area: Rect) {
         arg_lines.push(Line::from(vec![
             Span::styled(">> ", Style::default().fg(Color::Yellow)),
             Span::styled(&app.input_buffer, Style::default().fg(Color::White)),
-            Span::styled("_", Style::default().fg(Color::Yellow).add_modifier(Modifier::SLOW_BLINK)),
+            Span::styled(
+                "_",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::SLOW_BLINK),
+            ),
         ]));
     } else {
         arg_lines.push(Line::from(Span::styled(
@@ -847,7 +786,7 @@ fn render_function_tester(f: &mut Frame, app: &App, area: Rect) {
         .map(|r| {
             let color = if r.success { Color::Green } else { Color::Red };
             let icon = if r.success { "✓" } else { "✗" };
-            
+
             ListItem::new(vec![
                 Line::from(vec![
                     Span::styled(format!("{} ", icon), Style::default().fg(color)),
@@ -859,7 +798,10 @@ fn render_function_tester(f: &mut Frame, app: &App, area: Rect) {
                 ]),
                 Line::from(vec![
                     Span::styled("  Args: ", Style::default().fg(Color::Gray)),
-                    Span::styled(format!("{:?}", r.args), Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!("{:?}", r.args),
+                        Style::default().fg(Color::DarkGray),
+                    ),
                 ]),
                 Line::from(vec![
                     Span::styled("  Result: ", Style::default().fg(Color::Gray)),
@@ -918,8 +860,11 @@ fn render_pipeline_builder(f: &mut Frame, app: &App, area: Rect) {
         ],
     )
     .header(
-        Row::new(vec!["Step", "Script", "Function", "Arguments"])
-            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Row::new(vec!["Step", "Script", "Function", "Arguments"]).style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
     )
     .block(
         Block::default()
@@ -997,7 +942,9 @@ fn render_results(f: &mut Frame, app: &App, area: Rect) {
             let color = if r.success { Color::Green } else { Color::Red };
             let icon = if r.success { "✓" } else { "✗" };
             let style = if i == app.selected_result {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(color)
             };
@@ -1037,7 +984,10 @@ fn render_results(f: &mut Frame, app: &App, area: Rect) {
             ]),
             Line::from(vec![
                 Span::styled("Duration: ", Style::default().fg(Color::Gray)),
-                Span::styled(format!("{}ms", r.duration_ms), Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    format!("{}ms", r.duration_ms),
+                    Style::default().fg(Color::Yellow),
+                ),
             ]),
             Line::from(vec![
                 Span::styled("Timestamp: ", Style::default().fg(Color::Gray)),
@@ -1111,14 +1061,13 @@ fn render_export(f: &mut Frame, app: &App, area: Rect) {
     ];
 
     f.render_widget(
-        Paragraph::new(stats)
-            .block(
-                Block::default()
-                    .title("📈 Statistics")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Cyan))
-                    .padding(Padding::uniform(1)),
-            ),
+        Paragraph::new(stats).block(
+            Block::default()
+                .title("📈 Statistics")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .padding(Padding::uniform(1)),
+        ),
         chunks[0],
     );
 
@@ -1132,13 +1081,23 @@ fn render_export(f: &mut Frame, app: &App, area: Rect) {
             Line::from(vec![
                 Span::styled(">> ", Style::default().fg(Color::Yellow)),
                 Span::styled(&app.input_buffer, Style::default().fg(Color::White)),
-                Span::styled("_", Style::default().fg(Color::Yellow).add_modifier(Modifier::SLOW_BLINK)),
+                Span::styled(
+                    "_",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::SLOW_BLINK),
+                ),
             ]),
         ]
     } else {
         let code = app.export_pipeline();
         code.lines()
-            .map(|line| Line::from(Span::styled(line.to_owned(), Style::default().fg(Color::White))))
+            .map(|line| {
+                Line::from(Span::styled(
+                    line.to_owned(),
+                    Style::default().fg(Color::White),
+                ))
+            })
             .collect()
     };
 
@@ -1164,9 +1123,15 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
         .split(area);
 
     let keybinds = match app.current_view {
-        View::ScriptBrowser => "↑↓: Select | l: Load | r: Reload | Tab: Next View | ?: Help | q: Quit",
-        View::FunctionTester => "↑↓: Select Function | a: Add Args | Enter: Execute | p: Add to Pipeline | Tab: Next View",
-        View::PipelineBuilder => "↑↓: Select Step | x: Execute | d: Delete | c: Clear | Tab: Next View",
+        View::ScriptBrowser => {
+            "↑↓: Select | l: Load/unload | r: Reload | Tab: Next View | ?: Help | q: Quit"
+        }
+        View::FunctionTester => {
+            "↑↓: Select Function | a: Add Args | Enter: Execute | p: Add to Pipeline | Tab: Next View"
+        }
+        View::PipelineBuilder => {
+            "↑↓: Select Step | x: Execute | d: Delete | c: Clear | Tab: Next View"
+        }
         View::ResultsExplorer => "↑↓: Navigate | Tab: Next View",
         View::Export => "s: Save to File | Tab: Next View",
     };
@@ -1198,7 +1163,10 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
             };
 
             Line::from(vec![
-                Span::styled(format!("[{}] ", log.timestamp), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("[{}] ", log.timestamp),
+                    Style::default().fg(Color::DarkGray),
+                ),
                 Span::styled(format!("{} ", icon), Style::default().fg(color)),
                 Span::styled(&log.message, Style::default().fg(color)),
             ])
@@ -1224,36 +1192,56 @@ fn render_help_popup(f: &mut Frame) {
     let help_text = vec![
         Line::from(Span::styled(
             "MetaCall Playground - Help",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from(Span::styled("Global Keys:", Style::default().fg(Color::Yellow))),
+        Line::from(Span::styled(
+            "Global Keys:",
+            Style::default().fg(Color::Yellow),
+        )),
         Line::from("  Tab / Shift+Tab  - Navigate between views"),
         Line::from("  ?                - Toggle this help"),
         Line::from("  q                - Quit application"),
         Line::from(""),
-        Line::from(Span::styled("Script Browser:", Style::default().fg(Color::Yellow))),
+        Line::from(Span::styled(
+            "Script Browser:",
+            Style::default().fg(Color::Yellow),
+        )),
         Line::from("  ↑ / ↓            - Navigate scripts"),
         Line::from("  l                - Load selected script"),
         Line::from("  r                - Rescan directory"),
         Line::from(""),
-        Line::from(Span::styled("Function Tester:", Style::default().fg(Color::Yellow))),
+        Line::from(Span::styled(
+            "Function Tester:",
+            Style::default().fg(Color::Yellow),
+        )),
         Line::from("  ↑ / ↓            - Select function"),
         Line::from("  a                - Add argument"),
         Line::from("  c                - Clear arguments"),
         Line::from("  Enter            - Execute function"),
         Line::from("  p                - Add to pipeline"),
         Line::from(""),
-        Line::from(Span::styled("Pipeline Builder:", Style::default().fg(Color::Yellow))),
+        Line::from(Span::styled(
+            "Pipeline Builder:",
+            Style::default().fg(Color::Yellow),
+        )),
         Line::from("  ↑ / ↓            - Select step"),
         Line::from("  x                - Execute pipeline"),
         Line::from("  d                - Delete selected step"),
         Line::from("  c                - Clear all steps"),
         Line::from(""),
-        Line::from(Span::styled("Export View:", Style::default().fg(Color::Yellow))),
+        Line::from(Span::styled(
+            "Export View:",
+            Style::default().fg(Color::Yellow),
+        )),
         Line::from("  s                - Save pipeline to file"),
         Line::from(""),
-        Line::from(Span::styled("Press any key to close", Style::default().fg(Color::DarkGray))),
+        Line::from(Span::styled(
+            "Press any key to close",
+            Style::default().fg(Color::DarkGray),
+        )),
     ];
 
     let paragraph = Paragraph::new(help_text)
@@ -1322,16 +1310,10 @@ fn handle_input(app: &mut App, key: KeyCode, modifiers: KeyModifiers) -> io::Res
                         let content = app.export_pipeline();
                         match fs::write(&filename, content) {
                             Ok(_) => {
-                                app.add_log(
-                                    LogLevel::Success,
-                                    format!("Exported to {}", filename),
-                                );
+                                app.add_log(LogLevel::Success, format!("Exported to {}", filename));
                             }
                             Err(e) => {
-                                app.add_log(
-                                    LogLevel::Error,
-                                    format!("Failed to export: {}", e),
-                                );
+                                app.add_log(LogLevel::Error, format!("Failed to export: {}", e));
                             }
                         }
                         app.input_buffer.clear();
@@ -1372,15 +1354,13 @@ fn handle_input(app: &mut App, key: KeyCode, modifiers: KeyModifiers) -> io::Res
                 KeyCode::BackTab => {
                     app.prev_view();
                 }
-                _ => {
-                    match app.current_view {
-                        View::ScriptBrowser => handle_script_browser_input(app, key),
-                        View::FunctionTester => handle_function_tester_input(app, key),
-                        View::PipelineBuilder => handle_pipeline_builder_input(app, key),
-                        View::ResultsExplorer => handle_results_input(app, key),
-                        View::Export => handle_export_input(app, key),
-                    }
-                }
+                _ => match app.current_view {
+                    View::ScriptBrowser => handle_script_browser_input(app, key),
+                    View::FunctionTester => handle_function_tester_input(app, key),
+                    View::PipelineBuilder => handle_pipeline_builder_input(app, key),
+                    View::ResultsExplorer => handle_results_input(app, key),
+                    View::Export => handle_export_input(app, key),
+                },
             }
             Ok(false)
         }
@@ -1466,7 +1446,9 @@ fn handle_pipeline_builder_input(app: &mut App, key: KeyCode) {
             if !app.pipeline.is_empty() && app.selected_pipeline_step < app.pipeline.len() {
                 app.pipeline.remove(app.selected_pipeline_step);
                 app.add_log(LogLevel::Success, "Step deleted".to_string());
-                if app.selected_pipeline_step >= app.pipeline.len() && app.selected_pipeline_step > 0 {
+                if app.selected_pipeline_step >= app.pipeline.len()
+                    && app.selected_pipeline_step > 0
+                {
                     app.selected_pipeline_step -= 1;
                 }
             }
@@ -1520,7 +1502,10 @@ fn main() -> io::Result<()> {
     }
 
     let _metacall = initialize().map_err(|e| {
-        io::Error::new(io::ErrorKind::Other, format!("Failed to initialize MetaCall: {:?}", e))
+        io::Error::new(
+            io::ErrorKind::Other,
+            format!("Failed to initialize MetaCall: {:?}", e),
+        )
     })?;
 
     enable_raw_mode()?;
